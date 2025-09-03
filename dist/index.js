@@ -294,6 +294,7 @@ class GitHubHelper {
     }
     getActorPermission(repo, actor) {
         return __awaiter(this, void 0, void 0, function* () {
+            core.info(`Checking permissions for user ${actor} in repository ${repo.owner}/${repo.repo}`);
             // First, check for direct collaborator permissions
             const directPermission = yield this.getDirectCollaboratorPermission(repo, actor);
             if (directPermission !== 'none') {
@@ -305,6 +306,7 @@ class GitHubHelper {
     }
     getDirectCollaboratorPermission(repo, actor) {
         return __awaiter(this, void 0, void 0, function* () {
+            core.info(`Checking direct permissions`);
             // https://docs.github.com/en/graphql/reference/enums#repositorypermission
             // https://docs.github.com/en/graphql/reference/objects#repositorycollaboratoredge
             // Returns 'READ', 'TRIAGE', 'WRITE', 'MAINTAIN', 'ADMIN'
@@ -327,6 +329,7 @@ class GitHubHelper {
     getTeamBasedPermission(repo, actor) {
         var _a, _b, _c, _d, _e, _f;
         return __awaiter(this, void 0, void 0, function* () {
+            core.info(`Checking team-based permissions`);
             try {
                 // Check if this is an organization repository
                 const { data: repository } = yield this.octokit.rest.repos.get(Object.assign({}, repo));

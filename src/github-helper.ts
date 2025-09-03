@@ -90,6 +90,7 @@ export class GitHubHelper {
   }
 
   async getActorPermission(repo: Repository, actor: string): Promise<string> {
+    core.info(`Checking permissions for user ${actor} in repository ${repo.owner}/${repo.repo}`)
     // First, check for direct collaborator permissions
     const directPermission = await this.getDirectCollaboratorPermission(
       repo,
@@ -107,6 +108,7 @@ export class GitHubHelper {
     repo: Repository,
     actor: string
   ): Promise<string> {
+    core.info(`Checking direct permissions`)
     // https://docs.github.com/en/graphql/reference/enums#repositorypermission
     // https://docs.github.com/en/graphql/reference/objects#repositorycollaboratoredge
     // Returns 'READ', 'TRIAGE', 'WRITE', 'MAINTAIN', 'ADMIN'
@@ -138,6 +140,7 @@ export class GitHubHelper {
     repo: Repository,
     actor: string
   ): Promise<string> {
+    core.info(`Checking team-based permissions`)
     try {
       // Check if this is an organization repository
       const {data: repository} = await this.octokit.rest.repos.get({
