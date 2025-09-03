@@ -294,6 +294,17 @@ class GitHubHelper {
     }
     getActorPermission(repo, actor) {
         return __awaiter(this, void 0, void 0, function* () {
+            // First, check for direct collaborator permissions
+            const directPermission = yield this.getDirectCollaboratorPermission(repo, actor);
+            if (directPermission !== 'none') {
+                return directPermission;
+            }
+            // If no direct permission, check team-based permissions
+            return yield this.getTeamBasedPermission(repo, actor);
+        });
+    }
+    getDirectCollaboratorPermission(repo, actor) {
+        return __awaiter(this, void 0, void 0, function* () {
             // https://docs.github.com/en/graphql/reference/enums#repositorypermission
             // https://docs.github.com/en/graphql/reference/objects#repositorycollaboratoredge
             // Returns 'READ', 'TRIAGE', 'WRITE', 'MAINTAIN', 'ADMIN'
@@ -307,10 +318,95 @@ class GitHubHelper {
       }
     }`;
             const collaboratorPermission = yield this.octokit.graphql(query, Object.assign(Object.assign({}, repo), { collaborator: actor }));
-            core.debug(`CollaboratorPermission: ${(0, util_1.inspect)(collaboratorPermission.repository.collaborators.edges)}`);
+            core.debug(`Direct CollaboratorPermission: ${(0, util_1.inspect)(collaboratorPermission.repository.collaborators.edges)}`);
             return collaboratorPermission.repository.collaborators.edges.length > 0
                 ? collaboratorPermission.repository.collaborators.edges[0].permission.toLowerCase()
                 : 'none';
+        });
+    }
+    getTeamBasedPermission(repo, actor) {
+        var _a, _b, _c, _d, _e, _f;
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                // Check if this is an organization repository
+                const { data: repository } = yield this.octokit.rest.repos.get(Object.assign({}, repo));
+                if (!repository.owner.type || repository.owner.type !== 'Organization') {
+                    core.debug('Repository is not owned by an organization, skipping team permission check');
+                    return 'none';
+                }
+                core.debug(`Checking team permissions for user ${actor} using GraphQL`);
+                // Use GraphQL to get all teams and their permissions in a single query
+                const query = `query TeamPermissions($owner: String!, $repo: String!, $username: String!) {
+        repository(owner: $owner, name: $repo) {
+          teams(first: 100) {
+            nodes {
+              name
+              slug
+              repositories(first: 1, query: "${repo.owner}/${repo.repo}") {
+                nodes {
+                  name
+                  permissions
+                }
+              }
+              members(first: 100, query: $username) {
+                nodes {
+                  login
+                }
+              }
+            }
+          }
+        }
+      }`;
+                const teamPermissions = yield this.octokit.graphql(query, {
+                    owner: repo.owner,
+                    repo: repo.repo,
+                    username: actor
+                });
+                let highestPermission = 'none';
+                const permissionLevels = ['read', 'triage', 'write', 'maintain', 'admin'];
+                if ((_b = (_a = teamPermissions.repository) === null || _a === void 0 ? void 0 : _a.teams) === null || _b === void 0 ? void 0 : _b.nodes) {
+                    for (const team of teamPermissions.repository.teams.nodes) {
+                        // Check if the user is a member of this team
+                        const isMember = (_d = (_c = team.members) === null || _c === void 0 ? void 0 : _c.nodes) === null || _d === void 0 ? void 0 : _d.some((member) => member.login === actor);
+                        if (isMember && ((_f = (_e = team.repositories) === null || _e === void 0 ? void 0 : _e.nodes) === null || _f === void 0 ? void 0 : _f.length) > 0) {
+                            const teamRepo = team.repositories.nodes[0];
+                            if (teamRepo.permissions) {
+                                // The GraphQL API returns permissions object with pull, push, admin, etc.
+                                // We need to determine the highest permission level
+                                let teamPermission = 'none';
+                                if (teamRepo.permissions.admin) {
+                                    teamPermission = 'admin';
+                                }
+                                else if (teamRepo.permissions.maintain) {
+                                    teamPermission = 'maintain';
+                                }
+                                else if (teamRepo.permissions.push) {
+                                    teamPermission = 'write';
+                                }
+                                else if (teamRepo.permissions.triage) {
+                                    teamPermission = 'triage';
+                                }
+                                else if (teamRepo.permissions.pull) {
+                                    teamPermission = 'read';
+                                }
+                                core.debug(`User ${actor} has ${teamPermission} permission via team ${team.name}`);
+                                // Keep the highest permission level
+                                const teamPermissionLevel = permissionLevels.indexOf(teamPermission);
+                                const highestPermissionLevel = permissionLevels.indexOf(highestPermission);
+                                if (teamPermissionLevel > highestPermissionLevel) {
+                                    highestPermission = teamPermission;
+                                }
+                            }
+                        }
+                    }
+                }
+                core.debug(`Team-based permission for ${actor}: ${highestPermission}`);
+                return highestPermission;
+            }
+            catch (error) {
+                core.debug(`Error checking team permissions: ${utils.getErrorMessage(error)}`);
+                return 'none';
+            }
         });
     }
     tryAddReaction(repo, commentId, reaction) {
