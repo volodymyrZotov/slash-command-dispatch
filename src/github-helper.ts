@@ -37,40 +37,6 @@ type CollaboratorPermission = {
   }
 }
 
-type TeamPermission = {
-  repository: {
-    teams: {
-      nodes: [
-        {
-          name: string
-          slug: string
-          repositories: {
-            nodes: [
-              {
-                name: string
-                permissions: {
-                  admin: boolean
-                  maintain: boolean
-                  push: boolean
-                  triage: boolean
-                  pull: boolean
-                }
-              }
-            ]
-          }
-          members: {
-            nodes: [
-              {
-                login: string
-              }
-            ]
-          }
-        }
-      ]
-    }
-  }
-}
-
 export class GitHubHelper {
   private octokit: InstanceType<typeof Octokit>
 
@@ -90,7 +56,6 @@ export class GitHubHelper {
   }
 
   async getActorPermission(repo: Repository, actor: string): Promise<string> {
-    core.info(`Checking permissions for user ${actor} in repository ${repo.owner}/${repo.repo}`)
     // First, check for direct collaborator permissions
     const directPermission = await this.getDirectCollaboratorPermission(
       repo,
@@ -108,7 +73,7 @@ export class GitHubHelper {
     repo: Repository,
     actor: string
   ): Promise<string> {
-    core.info(`Checking direct permissions`)
+    core.debug(`Checking direct permissions`)
     // https://docs.github.com/en/graphql/reference/enums#repositorypermission
     // https://docs.github.com/en/graphql/reference/objects#repositorycollaboratoredge
     // Returns 'READ', 'TRIAGE', 'WRITE', 'MAINTAIN', 'ADMIN'
@@ -140,7 +105,7 @@ export class GitHubHelper {
     repo: Repository,
     actor: string
   ): Promise<string> {
-    core.info(`Checking team-based permissions`)
+    core.debug(`Checking team-based permissions`)
     try {
       // Check if this is an organization repository
       const {data: repository} = await this.octokit.rest.repos.get({
@@ -154,82 +119,92 @@ export class GitHubHelper {
         return 'none'
       }
 
-      core.debug(`Checking team permissions for user ${actor} using GraphQL`)
+      core.debug(`Checking team permissions for user ${actor} using REST API`)
 
-      // Use GraphQL to get all teams and their permissions in a single query
-      const query = `query TeamPermissions($owner: String!, $repo: String!, $username: String!) {
-        repository(owner: $owner, name: $repo) {
-          teams(first: 100) {
-            nodes {
-              name
-              slug
-              repositories(first: 1, query: "${repo.owner}/${repo.repo}") {
-                nodes {
-                  name
-                  permissions
-                }
-              }
-              members(first: 100, query: $username) {
-                nodes {
-                  login
-                }
-              }
-            }
-          }
-        }
-      }`
+      // Get all teams in the organization
+      const {data: allTeams} = await this.octokit.rest.teams.list({
+        org: repository.owner.login
+      })
 
-      const teamPermissions = await this.octokit.graphql<TeamPermission>(
-        query,
-        {
-          owner: repo.owner,
-          repo: repo.repo,
-          username: actor
-        }
-      )
+      core.debug(`Found ${allTeams.length} teams in organization`)
 
       let highestPermission = 'none'
       const permissionLevels = ['read', 'triage', 'write', 'maintain', 'admin']
 
-      if (teamPermissions.repository?.teams?.nodes) {
-        for (const team of teamPermissions.repository.teams.nodes) {
+      // Check each team for user membership and repository access
+      for (const team of allTeams) {
+        try {
           // Check if the user is a member of this team
-          const isMember = team.members?.nodes?.some(
-            (member: any) => member.login === actor
+          await this.octokit.rest.teams.getMembershipForUserInOrg({
+            org: repository.owner.login,
+            team_slug: team.slug,
+            username: actor
+          })
+
+          core.debug(`User ${actor} is member of team ${team.name}`)
+
+          // Check if team has access to the repository
+          await this.octokit.rest.teams.checkPermissionsForRepoInOrg({
+            org: repository.owner.login,
+            team_slug: team.slug,
+            owner: repo.owner,
+            repo: repo.repo
+          })
+
+          core.debug(`Team ${team.name} has access to repository`)
+
+          // Get the team's repositories to find the permission level
+          const {data: teamRepos} =
+            await this.octokit.rest.teams.listReposInOrg({
+              org: repository.owner.login,
+              team_slug: team.slug
+            })
+
+          const teamRepo = teamRepos.find(
+            teamRepo =>
+              teamRepo.name === repo.repo && teamRepo.owner.login === repo.owner
           )
 
-          if (isMember && team.repositories?.nodes?.length > 0) {
-            const teamRepo = team.repositories.nodes[0]
-            if (teamRepo.permissions) {
-              // The GraphQL API returns permissions object with pull, push, admin, etc.
-              // We need to determine the highest permission level
-              let teamPermission = 'none'
-              if (teamRepo.permissions.admin) {
-                teamPermission = 'admin'
-              } else if (teamRepo.permissions.maintain) {
-                teamPermission = 'maintain'
-              } else if (teamRepo.permissions.push) {
-                teamPermission = 'write'
-              } else if (teamRepo.permissions.triage) {
-                teamPermission = 'triage'
-              } else if (teamRepo.permissions.pull) {
-                teamPermission = 'read'
-              }
+          if (teamRepo && teamRepo.permissions) {
+            // Determine permission level
+            let teamPermission = 'none'
+            if (teamRepo.permissions.admin) {
+              teamPermission = 'admin'
+            } else if (teamRepo.permissions.maintain) {
+              teamPermission = 'maintain'
+            } else if (teamRepo.permissions.push) {
+              teamPermission = 'write'
+            } else if (teamRepo.permissions.triage) {
+              teamPermission = 'triage'
+            } else if (teamRepo.permissions.pull) {
+              teamPermission = 'read'
+            }
 
-              core.debug(
-                `User ${actor} has ${teamPermission} permission via team ${team.name}`
-              )
+            core.debug(
+              `User ${actor} has ${teamPermission} permission via team ${team.name}`
+            )
 
-              // Keep the highest permission level
-              const teamPermissionLevel =
-                permissionLevels.indexOf(teamPermission)
-              const highestPermissionLevel =
-                permissionLevels.indexOf(highestPermission)
-              if (teamPermissionLevel > highestPermissionLevel) {
-                highestPermission = teamPermission
-              }
+            // Keep the highest permission level
+            const teamPermissionLevel = permissionLevels.indexOf(teamPermission)
+            const highestPermissionLevel =
+              permissionLevels.indexOf(highestPermission)
+            if (teamPermissionLevel > highestPermissionLevel) {
+              highestPermission = teamPermission
+            }
+          } else {
+            core.debug(
+              `Team ${team.name} has access but no permission details found`
+            )
+            // If team has access but we can't determine exact permission, default to read
+            const readLevel = permissionLevels.indexOf('read')
+            const highestLevel = permissionLevels.indexOf(highestPermission)
+            if (readLevel > highestLevel) {
+              highestPermission = 'read'
             }
           }
+        } catch (membershipError) {
+          // User is not a member of this team
+          core.debug(`User ${actor} is not a member of team ${team.name}`)
         }
       }
 
